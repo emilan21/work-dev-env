@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Verify config and save/restore using only a disposable tmux server and state."""
 import os
+import platform
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -46,6 +48,22 @@ with tempfile.TemporaryDirectory(prefix='work-tmux-') as tmp:
         tmux('has-session', '-t', '=test-save')
         assert len(tmux('list-windows', '-t', 'test-save', '-F', '#W').stdout.splitlines()) == 2
         assert tmux('list-panes', '-t', 'test-save:1', '-F', '#{pane_id}').stdout.count('\n') == 2
+        if platform.system() == 'Darwin':
+            # A macOS runner has no other tmux servers, so exercise continuum's
+            # real cold-start path as well as resurrect's manual restore.
+            tmux('kill-server')
+            env.pop('TMUX', None)
+            config = Path(tmp) / 'restart.conf'
+            config.write_text('source-file ' + json.dumps(str(root / 'config/tmux/tmux.conf'))
+                              + '\nset -g @resurrect-dir ' + json.dumps(str(Path(tmp) / 'snapshots')) + '\n')
+            tmux('-f', str(config), 'new-session', '-d', '-s', 'startup', '-c', tmp)
+            deadline = time.monotonic() + 20
+            while tmux('show-option', '-gqv', '@work-restore-done', check=False).stdout.strip() != '1':
+                if time.monotonic() > deadline:
+                    raise AssertionError('Cold-start automatic restore did not complete')
+                time.sleep(0.1)
+            tmux('has-session', '-t', '=test-save')
+            print('macOS cold-start automatic restore passed.')
         print('Isolated tmux configuration and save/restore passed.')
     finally:
         tmux('kill-server', check=False)

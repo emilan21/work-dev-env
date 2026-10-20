@@ -102,6 +102,36 @@ class SessionizerTests(unittest.TestCase):
             sessionizer.open_project(Path('/project with spaces'))
             self.assertEqual(call.call_count, 1)
 
+    def test_restore_finishes_before_project_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            snapshot = home / '.local/state/work-dev-env/resurrect/last'
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_text('saved session')
+            calls = []
+            restored = False
+
+            def fake_tmux(*args, check=True):
+                nonlocal restored
+                calls.append(args)
+                code, out = 0, ''
+                if args[0] == 'has-session':
+                    code = 0 if restored else 1
+                elif args[0] == 'list-sessions':
+                    code = 1
+                elif args[0] == 'show-option':
+                    restored, out = True, '1\n'
+                return subprocess.CompletedProcess(args, code, stdout=out)
+
+            with patch.object(sessionizer, 'tmux', side_effect=fake_tmux), \
+                 patch.object(sessionizer.Path, 'home', return_value=home):
+                sessionizer.open_project(home)
+            created = [args for args in calls if args[0] == 'new-session']
+            self.assertEqual(len(created), 1)
+            self.assertTrue(created[0][3].startswith('work-startup-'))
+            self.assertFalse(any('editor' in args for args in calls))
+            self.assertEqual(calls[-1][0], 'kill-session')
+
     def test_direct_directory_uses_argv_and_attaches(self):
         with tempfile.TemporaryDirectory(prefix="space and 'quote ") as tmp:
             with patch('sys.argv', ['ts', tmp]), patch.object(sessionizer.shutil, 'which', return_value='/bin/tool'), \
