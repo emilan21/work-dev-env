@@ -1,0 +1,18 @@
+{
+  "lazy.nvim": {
+    "url": "https://github.com/folke/lazy.nvim.git",
+    "commit": "85c7ff3711b730b4030d03144f6db6375044ae82"
+  },
+  "tmux-resurrect": {
+    "url": "https://github.com/tmux-plugins/tmux-resurrect.git",
+    "commit": "cff343cf9e81983d3da0c8562b01616f12e8d548"
+  },
+  "tmux-continuum": {
+    "url": "https://github.com/tmux-plugins/tmux-continuum.git",
+    "commit": "0698e8f4b17d6454c71bf5212895ec055c578da0"
+  },
+  "LazyVim": {
+    "url": "https://github.com/LazyVim/LazyVim.git",
+    "commit": "999700997f72227187d49d8b92667183dc7fc809"
+  }
+}

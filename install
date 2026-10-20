@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Deploy only work-dev-env's explicit config targets, with reversible backups."""
+import argparse
+import datetime
+import json
+import os
+from pathlib import Path
+import shutil
+import sys
+
+ROOT = Path(__file__).resolve().parent
+HOME = Path.home()
+STATE = HOME / '.local/state/work-dev-env'
+TARGETS = {
+    '.config/alacritty/alacritty.toml': 'config/alacritty/alacritty.toml',
+    '.config/tmux/tmux.conf': 'config/tmux/tmux.conf',
+    '.config/tmux-sessionizer/config.json': 'config/tmux-sessionizer/config.json',
+    '.config/nvim': 'config/nvim',
+    '.config/work-dev-env/work-env.zsh': 'shell/work-env.zsh',
+    '.local/bin/ts': 'bin/tmux-sessionizer',
+    '.local/bin/tmux-sessionizer': 'bin/tmux-sessionizer',
+}
+
+
+def exists(path):
+    return os.path.lexists(path)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--restore', type=Path, metavar='BACKUP')
+    args = parser.parse_args()
+    if args.restore:
+        backup = args.restore.expanduser().absolute()
+        manifest = json.loads((backup / 'manifest.json').read_text())
+        if manifest['home'] != str(HOME) or not set(manifest['targets']) <= set(TARGETS):
+            raise ValueError('Backup does not match this home or target allowlist')
+        # Refuse to overwrite changes made after installation.
+        for rel, item in manifest['targets'].items():
+            dst = HOME / rel
+            if exists(dst) and (not dst.is_symlink() or os.readlink(dst) != item['installed']):
+                raise ValueError(f'Target changed since installation: {dst}; move it aside first')
+            if item['existed'] and not exists(backup / 'files' / rel):
+                raise ValueError(f'Original backup missing: {rel}')
+        for rel, item in manifest['targets'].items():
+            dst = HOME / rel
+            print(f'Restore {dst}')
+            if args.dry_run:
+                continue
+            if dst.is_symlink():
+                dst.unlink()
+            if item['existed']:
+                shutil.move(str(backup / 'files' / rel), str(dst))
+        if not args.dry_run:
+            (backup / 'manifest.json').rename(backup / 'restored.json')
+        return
+    changes = {}
+    for rel, source in TARGETS.items():
+        src, dst = ROOT / source, HOME / rel
+        if dst.is_symlink() and os.readlink(dst) == str(src):
+            continue
+        changes[rel] = {'installed': str(src), 'existed': exists(dst)}
+        print(f'{"Back up and link" if exists(dst) else "Link"}: {dst} -> {src}')
+    if args.dry_run or not changes:
+        print('Preview only.' if args.dry_run else 'Already installed.')
+        return
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
+    backup = STATE / 'backups' / stamp
+    backup.mkdir(parents=True, mode=0o700)
+    os.chmod(STATE, 0o700)
+    manifest = {'home': str(HOME), 'targets': {}}
+    # Persist each completed step, so a partial installation is recoverable.
+    for rel, item in changes.items():
+        dst = HOME / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if item['existed']:
+            saved = backup / 'files' / rel
+            saved.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(dst), str(saved))
+        manifest['targets'][rel] = item
+        (backup / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+        dst.symlink_to(item['installed'])
+    print(f'Backup: {backup}')
+    print('Next: source the optional zsh snippet, then run ./bootstrap.')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, KeyError) as error:
+        sys.exit(str(error))

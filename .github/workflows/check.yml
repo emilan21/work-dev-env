@@ -1,0 +1,33 @@
+name: macOS configuration checks
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install explicit dependencies
+        run: brew bundle --file Brewfile
+      - name: Check configs and installer
+        run: make check
+      - name: Bootstrap isolated environment
+        shell: bash
+        run: |
+          check_home="$RUNNER_TEMP/work-env-home"
+          mkdir -p "$check_home"
+          export HOME="$check_home"
+          unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME NVIM_APPNAME
+          ./install
+          export PATH="$(brew --prefix llvm)/bin:$PATH"
+          ./bootstrap
+          WORK_ENV_SCRIPT=scripts/smoke.lua nvim --headless -c 'lua dofile("scripts/run.lua")' +qa
+          python3 scripts/tmux_smoke.py
+      - name: Validate Alacritty configuration
+        run: |
+          if command -v alacritty >/dev/null 2>&1; then
+            alacritty migrate --dry-run --skip-imports --config-file config/alacritty/alacritty.toml
+          else
+            echo 'Alacritty TOML checked; native validation requires an approved Alacritty install.'
+          fi

@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Select a work project and attach or switch its tmux session."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+
+def tmux(*args, check=True):
+    return subprocess.run(['tmux', *args], text=True, capture_output=True, check=check)
+
+
+def session_name(path):
+    name = re.sub(r'[^a-zA-Z0-9_-]', '_', path.name)[:40] or 'project'
+    return name + '-' + hashlib.sha256(os.fsencode(path)).hexdigest()[:10]
+
+
+def projects(settings):
+    depth = settings.get('max_depth', 2)
+    if not isinstance(depth, int) or depth < 1:
+        raise ValueError('max_depth must be a positive integer')
+    result = set()
+    for entry in settings.get('search_paths', ['~/Work', '~/Projects']):
+        root = Path(entry).expanduser()
+        if not root.is_dir():
+            continue
+        for current, dirs, _ in os.walk(root):
+            dirs[:] = sorted(d for d in dirs if not d.startswith('.') and d not in ('node_modules', 'vendor'))
+            level = len(Path(current).relative_to(root).parts)
+            if level:
+                result.add(str(Path(current).resolve()))
+            if level >= depth:
+                dirs[:] = []
+    return sorted(result)
+
+
+def open_project(path):
+    name = session_name(path)
+    if tmux('has-session', '-t', '=' + name, check=False).returncode:
+        # A bootstrap session lets continuum finish before we create project panes.
+        if tmux('list-sessions', check=False).returncode:
+            boot = 'work-startup-' + str(os.getpid())
+            tmux('new-session', '-d', '-s', boot, '-c', str(path))
+            tmux('new-window', '-d', '-t', boot + ':', '-c', str(path))
+            snapshot = Path.home() / '.local/state/work-dev-env/resurrect/last'
+            if snapshot.exists():
+                deadline = time.monotonic() + 20
+                while tmux('show-option', '-gqv', '@work-restore-done', check=False).stdout.strip() != '1':
+                    if time.monotonic() > deadline:
+                        raise ValueError('Automatic restore did not finish. Run tmux attach to inspect; no project session was created.')
+                    time.sleep(0.1)
+            # Keep the server alive until the project session exists.
+        else:
+            boot = None
+        if tmux('has-session', '-t', '=' + name, check=False).returncode:
+            # Shell command is constant; paths are passed through tmux's -c argument.
+            tmux('new-session', '-d', '-s', name, '-n', 'editor', '-c', str(path), 'nvim')
+            tmux('new-window', '-d', '-t', name + ':', '-n', 'terminal', '-c', str(path))
+        if boot:
+            tmux('kill-session', '-t', '=' + boot)
+    return name
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('directory', nargs='?')
+    args = parser.parse_args()
+    for command in ('tmux', 'nvim'):
+        if not shutil.which(command):
+            raise ValueError(f'{command} missing; run brew bundle --file Brewfile')
+    if args.directory:
+        path = Path(args.directory).expanduser().resolve()
+        if not path.is_dir():
+            raise ValueError(f'Not a directory: {path}')
+        name = open_project(path)
+    else:
+        if not shutil.which('fzf'):
+            raise ValueError('fzf missing; run brew bundle --file Brewfile')
+        settings = {}
+        for file in ('config.json', 'local.json'):
+            config = Path.home() / '.config/tmux-sessionizer' / file
+            if config.exists():
+                settings.update(json.loads(config.read_text()))
+        sessions = tmux('list-sessions', '-F', '#{session_name}', check=False).stdout.splitlines()
+        choices = {'[session] ' + name: ('session', name) for name in sessions}
+        choices.update({path: ('project', path) for path in projects(settings) if '\n' not in path})
+        if not choices:
+            print('No projects found. Create ~/Work or ~/Projects, or run ts <directory>.')
+            return
+        result = subprocess.run(['fzf', '--prompt=Project > '], input='\n'.join(choices) + '\n', text=True, stdout=subprocess.PIPE)
+        if result.returncode in (1, 130):
+            return
+        result.check_returncode()
+        kind, selected = choices[result.stdout.rstrip('\n')]
+        name = selected if kind == 'session' else open_project(Path(selected))
+    command = 'switch-client' if os.environ.get('TMUX') else 'attach-session'
+    # Replace the picker process so terminal signals reach the tmux client.
+    os.execvp('tmux', ['tmux', command, '-t', '=' + name])
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        sys.exit(str(error))
